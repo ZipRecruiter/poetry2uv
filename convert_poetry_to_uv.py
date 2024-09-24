@@ -30,7 +30,7 @@ class PyProject:
             if package_name in self.sources:
                 raise NotImplementedError(f"Can not handle duped sources with name {package_name}!\n{self.sources[package_name]} -> {version['git']}")
             source = tomlkit.inline_table()
-            source.update({k, v for k, v in version.items() if k in self.git_source_keys})
+            source.update({k: v for k, v in version.items() if k in self.git_source_keys})
             self.sources[package_name] = source
             return ''
         if (match := self.version_pattern.match(version)) is not None:
@@ -58,14 +58,22 @@ class PyProject:
         for name, dep_v in deps_list.items():
             if name == "python":
                 python_version = dep_v
-                continue
-            if isinstance(dep_v, dict):
-                members.append(dep_v['path'])
-                continue
+            elif isinstance(dep_v, dict):
+                if 'path' in dep_v:
+                    members.append(dep_v.pop('path'))
+                vers = ''
+                if 'extras' in dep_v:
+                    vers = dep_v.pop('extras')
+                if 'version' in dep_v:
+                    conv_v = self.convert_version_constraint(dep_v.pop('version'))
+                    vers = f"{vers}{conv_v}"
+                if vers:
+                    deps.append(f"{name}{vers}")
+                if dep_v:
+                    raise NotImplementedError(f"Remaining key{'s' if len(dep_v.keys()) > 1 else ''} in deps entry: {dep_v.keys()}")
             elif dep_v:
                 dep_v = self.convert_version_constraint(dep_v)
-            deps.append(f"{name}{dep_v}")
-
+                deps.append(f"{name}{dep_v}")
         return deps, members
 
 
@@ -75,7 +83,7 @@ class PyProject:
         with open(requirements_file) as f:
             for line in f.readlines():
                 split_line = line.split()
-                if split_line[1] == ';':
+                if len(split_line) > 0 and (len(split_line) == 1 or split_line[1] == ';'):
                     reqs.append(split_line[0])
         return reqs
 
