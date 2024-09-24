@@ -7,6 +7,7 @@ import tomlkit
 class PyProject:
 
     version_pattern = re.compile(r'^([^\d]?)([\d.]+)')
+    git_source_keys = {'git', 'rev', 'tag', 'branch'}
 
     def __init__(self, input_file: str, output_file: str, exported_reqs: str = ''):
         self.convert_to_pep508(input_file, output_file, exported_reqs)
@@ -29,9 +30,9 @@ class PyProject:
             if package_name in self.sources:
                 raise NotImplementedError(f"Can not handle duped sources with name {package_name}!\n{self.sources[package_name]} -> {version['git']}")
             source = tomlkit.inline_table()
-            source.update({'git': version['git']})
+            source.update({k, v for k, v in version.items() if k in self.git_source_keys})
             self.sources[package_name] = source
-            return f"{package_name} @ {version['rev']}"
+            return ''
         if (match := self.version_pattern.match(version)) is not None:
             symbols = match.group(1)
             numbers = match.group(2)
@@ -41,7 +42,6 @@ class PyProject:
                 return ""
             elif symbols == "^":
                 symbols = ">="
-
             return f"{symbols}{numbers}"
         if version == '*':
             return ''
@@ -90,7 +90,8 @@ class PyProject:
             data = tomlkit.parse(f.read())
 
         # Extract relevant data from the Poetry section
-        poetry_data = data.get('tool', {}).get('poetry', {})
+        #tool = data.pop('tool', {})
+        poetry_data = data.get('tool', {}).pop('poetry', {})
         project_name = poetry_data.get('name')
         version = poetry_data.get('version')
         description = poetry_data.get('description')
@@ -116,10 +117,16 @@ class PyProject:
             opt_deps, opt_members = self.convert_deps_list(group['dependencies'])
             optional_deps[group_name] = opt_deps
 
-        # if specified, get exact versions from an exported requirements.txt file
-        if exported_reqs:
-            deps = self.extract_from_requirements_txt(exported_reqs)
-            optional_deps = {}
+        # get any entries that remain
+        tool = data.get('tool', {})
+        if tool:
+            print('remaining keys in tool:', tool.keys())
+
+        # remove keys known to be unneeded
+        data.pop('build-system', None)
+        data.pop('tool')
+        if data:
+            print('remaining keys in data:', data.keys())
 
         # Construct the PEP 508 project table
         pep508_data = {
@@ -137,7 +144,8 @@ class PyProject:
                     'dev-dependencies': dev_deps,
                     'workspace': workspace_table,
                     'sources': self.sources,
-                }
+                },
+                **tool,
             }
         }
         container = tomlkit.container.Container()
@@ -147,6 +155,13 @@ class PyProject:
         # Write the PEP 508 data to the output file
         with open(output_file, 'w') as f:
             tomlkit.dump(pep508_data, f)
+
+        # if specified, get exact versions from an exported requirements.txt file
+        if exported_reqs:
+            pep508_data['project']['dependencies'] = self.extract_from_requirements_txt(exported_reqs)
+            optional_deps.clear()
+            with open('pyproject_pinned.toml', 'w') as f:
+                tomlkit.dump(pep508_data, f)
 
     
 if __name__ == '__main__':
