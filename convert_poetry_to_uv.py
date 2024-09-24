@@ -62,6 +62,8 @@ class PyProject:
             elif isinstance(dep_v, dict):
                 if 'path' in dep_v:
                     members.append(dep_v.pop('path'))
+                    if 'develop' in dep_v:
+                        print(f"warning, {members[-1]} was labeled as 'develop'={dep_v.pop('develop')}, but workspace members are always editable")
                 vers = ''
                 if 'extras' in dep_v:
                     vers = dep_v.pop('extras')
@@ -116,7 +118,6 @@ class PyProject:
         dependencies = poetry_data.pop('dependencies', {})
         dev_dependencies = poetry_data.pop('dev-dependencies', {})
         self.sources = {}
-        #print(type(authors), type(authors[0]))
 
         # get main and dev deps
         python_version = dependencies['python']
@@ -137,7 +138,6 @@ class PyProject:
 
         # convert authors to PEP 621 format
         author_tables = [self.get_author_name_email(author) for author in authors]
-        print(author_tables)
         authors = tomlkit.array()
         authors.extend(author_tables)
 
