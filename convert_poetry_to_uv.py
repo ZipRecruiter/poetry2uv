@@ -7,6 +7,7 @@ import tomlkit
 class PyProject:
 
     version_pattern = re.compile(r'^([^\d]?)([\d.]+)')
+    author_pattern = re.compile(r"^(.*?)\s+<([^>]+)>$")
     git_source_keys = {'git', 'rev', 'tag', 'branch'}
 
     def __init__(self, input_file: str, output_file: str, exported_reqs: str = ''):
@@ -87,6 +88,14 @@ class PyProject:
                     reqs.append(split_line[0])
         return reqs
 
+    def get_author_name_email(self, author_full: str) -> tomlkit.items.InlineTable:
+        author_table = tomlkit.inline_table()
+        if (match := self.author_pattern.match(author_full)) is not None:
+            name, email = match.groups()
+            author_table.update({'name': name, 'email': email})
+        else:
+            author_table.update({'name': author_full})
+        return author_table
 
     def convert_to_pep508(self, input_file: str, output_file: str, exported_reqs: str = ''):
         """Converts a Poetry-style pyproject.toml to PEP 508 format.
@@ -98,15 +107,16 @@ class PyProject:
             data = tomlkit.parse(f.read())
 
         # Extract relevant data from the Poetry section
-        #tool = data.pop('tool', {})
-        poetry_data = data.get('tool', {}).pop('poetry', {})
-        project_name = poetry_data.get('name')
-        version = poetry_data.get('version')
-        description = poetry_data.get('description')
-        authors = poetry_data.get('authors')
-        dependencies = poetry_data.get('dependencies', {})
-        dev_dependencies = poetry_data.get('dev-dependencies', {})
+        tool = data.pop('tool', {})
+        poetry_data = tool.pop('poetry')
+        project_name = poetry_data.pop('name')
+        version = poetry_data.pop('version')
+        description = poetry_data.pop('description')
+        authors = poetry_data.pop('authors')
+        dependencies = poetry_data.pop('dependencies', {})
+        dev_dependencies = poetry_data.pop('dev-dependencies', {})
         self.sources = {}
+        #print(type(authors), type(authors[0]))
 
         # get main and dev deps
         python_version = dependencies['python']
@@ -125,14 +135,19 @@ class PyProject:
             opt_deps, opt_members = self.convert_deps_list(group['dependencies'])
             optional_deps[group_name] = opt_deps
 
+        # convert authors to PEP 621 format
+        author_tables = [self.get_author_name_email(author) for author in authors]
+        print(author_tables)
+        authors = tomlkit.array()
+        authors.extend(author_tables)
+
         # get any entries that remain
-        tool = data.get('tool', {})
         if tool:
             print('remaining keys in tool:', tool.keys())
+            #raise
 
         # remove keys known to be unneeded
         data.pop('build-system', None)
-        data.pop('tool')
         if data:
             print('remaining keys in data:', data.keys())
 
