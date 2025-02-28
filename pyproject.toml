@@ -17,3 +17,8 @@ poetry2uv = "poetry2uv.cli:main"
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+]
