@@ -33,7 +33,7 @@ poetry export -C $project_dir -f requirements.txt --output $project_dir/requirem
 sed -i '' '/file:/d' "${project_dir}/requirements_poetry.txt"
 
 echo "Generate two versions of pyproject.toml, one with exact versions and one with constraints from prior pyproject.toml"
-pyzr run $script_directory -- python ${script_directory}/convert_poetry_to_uv.py --requirements requirements_poetry.txt --project-dir $project_dir "${script_args[@]}"
+uv run $script_directory -- python ${script_directory}/convert_poetry_to_uv.py --requirements requirements_poetry.txt --project-dir $project_dir "${script_args[@]}"
 
 echo "Create uv.lock with exact versions"
 cd $project_dir
