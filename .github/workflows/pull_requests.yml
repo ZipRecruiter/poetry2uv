@@ -1,0 +1,679 @@
+name: PR Checks
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+concurrency:
+  group: "pr-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  GITHUB_PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+
+jobs:
+  files-changed:
+    name: Detect which files changed
+    runs-on: cicd
+    timeout-minutes: 3
+    # Map a step output to a job output
+    outputs:
+      check-codeowners: ${{ steps.changes.outputs.check-codeowners }}
+      check-cube: ${{ steps.changes.outputs.check-cube }}
+      check-databricks-terraform: ${{ steps.changes.outputs.check-databricks-terraform }}
+      check-databricks-terraform-files: ${{ steps.changes.outputs.check-databricks-terraform_files }}
+      check-dbt: ${{ steps.changes.outputs.check-dbt }}
+      check-druid: ${{ steps.changes.outputs.check-druid }}
+      check-model-catalog-yaml: ${{ steps.changes.outputs.check-model-catalog-yaml }}
+      check-fdk: ${{ steps.changes.outputs.check-fdk }}
+      check-gateway: ${{ steps.changes.outputs.check-gateway }}
+      check-frontend: ${{ steps.changes.outputs.check-frontend }}
+      check-zds: ${{ steps.changes.outputs.check-zds }}
+      check-visual-tests: ${{ steps.changes.outputs.check-visual-tests }}
+      check-node: ${{ steps.changes.outputs.check-node }}
+      check-node-lint: ${{ steps.changes.outputs.check-node-lint }}
+      check-node-test: ${{ steps.changes.outputs.check-node-test }}
+      check-node-proto: ${{ steps.changes.outputs.check-node-proto }}
+      check-go: ${{ steps.changes.outputs.check-go }}
+      check-go-config: ${{ steps.changes.outputs.check-go-config }}
+      check-py: ${{ steps.changes.outputs.check-py }}
+      check-gradle-jdk17: ${{ steps.changes.outputs.check-gradle-jdk17 }}
+      check-sqitch: ${{ steps.changes.outputs.check-sqitch }}
+      check-protobuf: ${{ steps.changes.outputs.check-protobuf }}
+      check-epoxy: ${{ steps.changes.outputs.check-epoxy }}
+      check-terraform: ${{ steps.changes.outputs.check-terraform }}
+      check-backstage-catalog: ${{ steps.changes.outputs.check-backstage-catalog }}
+    steps:
+      - name: Get file filters
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+          FILTER_DIR="/tmp/file-filters"
+          rm -rf $FILTER_DIR; mkdir -p $FILTER_DIR && gh api -H 'Accept: application/vnd.github.v3.raw' "repos/$GITHUB_REPOSITORY/contents/.github/file-filters.yml?ref=$GITHUB_HEAD_SHA" > $FILTER_DIR/file-filters.yml
+      - name: Check for file changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          token: ${{ github.token }}
+          filters: /tmp/file-filters/file-filters.yml
+          list-files: shell
+
+  # XXX jdonahue: Maybe we don't need this with Github? Probably do, but can implement it later.
+  # maybe-rebase:
+  #   runs-on:
+  #     - cicd
+  #   timeout-minutes: 60
+  #   steps:
+  #   - uses: actions/checkout@v4.1.0
+  #     with:
+  #       fetch-depth: 20
+  #   - run: ZR_GO_SCRIPT_DIR=$(pwd)/bin cicd maybe-rebase-and-cancel-pipeline
+  #
+  check-codeowners:
+    if: needs.files-changed.outputs.check-codeowners == 'true'
+    needs: files-changed
+    runs-on:
+      - cicd
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        ref: ${{ env.GITHUB_HEAD_SHA }}
+        fetch-depth: 0
+    - run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token && ./cicd/bin/pre-merge-codeowners-check
+
+  check-cube:
+    if: needs.files-changed.outputs.check-cube == 'true'
+    needs: files-changed
+    runs-on:
+      - python
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./data/cube/scripts/cube_validator"
+
+  check-databricks-terraform:
+    if: needs.files-changed.outputs.check-databricks-terraform == 'true'
+    needs: files-changed
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on:
+      - cicd
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./cicd/bin/pre-merge-databricks-tf-check ${{ needs.files-changed.outputs.check-databricks-terraform-files }}"
+    - name: Check if tf output exists
+      if: success() || failure()
+      id: check-file
+      run: |
+        if [ -f "$(pwd)/databricks_terraform_output.txt" ]; then
+          echo "file-exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "file-exists=false" >> $GITHUB_OUTPUT
+        fi
+    - name: Read terraform output file
+      if:  steps.check-file.outputs.file-exists == 'true'
+      id: read-file
+      run: |
+        modified_output_file=$(<"$(pwd)/databricks_terraform_output.txt")
+        echo "tf_escaped_output=$(printf '%s' "$modified_output_file" | jq -sRr @json)" >> "$GITHUB_OUTPUT"
+    - name: Post PR comment
+      if: steps.check-file.outputs.file-exists == 'true'
+      uses: actions/github-script@v7
+      env:
+        TF_OUTPUT: ${{ steps.read-file.outputs.tf_escaped_output }}
+      with:
+        script: |
+          github.rest.issues.createComment({
+          issue_number: context.issue.number,
+          owner: context.repo.owner,
+          repo: context.repo.repo ,
+          body: ${{ env.TF_OUTPUT }}
+          });
+
+  check-dbt:
+    if: needs.files-changed.outputs.check-dbt == 'true'
+    needs: files-changed
+    runs-on:
+      - python
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./data/dbt/main/scripts/zr-dbt-validate"
+
+  check-druid:
+    if: needs.files-changed.outputs.check-druid == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: "./bin/zr-druid validate"
+
+  check-fdk:
+    if: needs.files-changed.outputs.check-fdk == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-fdk-check"
+
+  check-gateway:
+    if: needs.files-changed.outputs.check-gateway == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-gateway-config-check"
+
+  check-model-catalog-yaml:
+    if: needs.files-changed.outputs.check-model-catalog-yaml == 'true'
+    needs: files-changed
+    runs-on:
+      - python
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./data/model_catalog_server/validation/run_validation_for_model_catalog.sh"
+
+  check-commit-message:
+    runs-on:
+      - cicd
+    if: ${{ github.event.pull_request.base.ref }} == "main" && ${{ github.event.pull_request.title }} !~ /^(Draft:|WIP)/
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        ref: ${{ env.GITHUB_HEAD_SHA }}
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-message-check"
+
+  check-no-merges:
+    runs-on:
+      - cicd
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        ref: ${{ env.GITHUB_HEAD_SHA }}
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-no-merges-to-branch"
+
+  check-file-size:
+    runs-on:
+      - cicd
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        ref: ${{ env.GITHUB_HEAD_SHA }}
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-no-new-large-files"
+
+  check-frontend:
+    if: needs.files-changed.outputs.check-frontend == 'true'
+    needs: files-changed
+    runs-on:
+      - node
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        clean: true
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-frontend-check"
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions
+#     # 'artifacts.coverage_report' was not transformed because there is no suitable equivalent in GitHub Actions
+
+  check-zds:
+    if: needs.files-changed.outputs.check-zds == 'true'
+    needs: files-changed
+    runs-on:
+      - node
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-zds-check"
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions
+
+  check-zds-a11y:
+    if: needs.files-changed.outputs.check-zds == 'true'
+    needs: files-changed
+    runs-on:
+      - node
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-zds-a11y-check"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: test-reports
+        path: frontend/packages/zds/artifacts/*.html
+
+  check-visual-tests:
+    if: needs.files-changed.outputs.check-visual-tests == 'true' && !contains(github.event.pull_request.labels.*.name, 'SkipVisualTests')
+    needs: files-changed
+    runs-on:
+      - node
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-check-visual-tests"
+
+  check-node:
+    if: needs.files-changed.outputs.check-node == 'true'
+    needs: files-changed
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on:
+      - node
+    timeout-minutes: 60
+    env:
+      GIT_CLEAN_FLAGS: "-ffdx -e node_services/"
+    steps:
+    - name: Run checkout action
+      uses: actions/checkout@v4.1.0
+      with:
+        clean: true
+        fetch-depth: 0
+    - name: Run cicd/bin/pre-merge-node-check
+      run: "./cicd/bin/pre-merge-node-check"
+    - name: Check if overdue packages file output exists
+      id: check-file
+      if: success() || failure()
+      run: |
+        if [ -f "$(pwd)/app/view/dist/check-due-dates-output.txt" ]; then
+          echo "Found output file at $(pwd)/app/view/dist/check-due-dates-output.txt"
+          echo "file-exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "Did not find output file at $(pwd)/app/view/dist/check-due-dates-output.txt"
+          echo "file-exists=false" >> $GITHUB_OUTPUT
+        fi
+    - name: Read overdue packages output file
+      id: read-file
+      if: ${{ (success() || failure()) && steps.check-file.outputs.file-exists == 'true' }}
+      run: |
+        modified_output_file=$(<"$(pwd)/app/view/dist/check-due-dates-output.txt")
+        echo "due_dates_escaped_output=$(printf '%s' "$modified_output_file" | jq -sRr @json)" >> "$GITHUB_OUTPUT"
+    - name: Delete previous overdue packages comments
+      if: ${{ (success() || failure()) && steps.check-file.outputs.file-exists == 'true' }}
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { data: comments } = await github.rest.issues.listComments({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+          });
+
+          const workflowBotComments = comments.filter(comment =>
+            comment.user.type === 'Bot' && comment.body.includes('FSTS Guild check-due-dates Comment')
+          );
+
+          await Promise.all(
+            workflowBotComments.map(comment =>
+              github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+              })
+            )
+          );
+    
+    - name: Post comment for overdue packages
+      if: ${{ (success() || failure()) && steps.check-file.outputs.file-exists == 'true' }}
+      uses: actions/github-script@v7
+      env:
+        DUE_DATES_OUTPUT: ${{ steps.read-file.outputs.due_dates_escaped_output }}
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: ${{ env.DUE_DATES_OUTPUT }}
+          });
+
+  check-node-lint:
+    if: needs.files-changed.outputs.check-node-lint == 'true'
+    needs: files-changed
+    runs-on:
+      - node
+    timeout-minutes: 60
+    env:
+      GIT_CLEAN_FLAGS: "-ffdx -e node_services/"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        clean: true
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-node-lint-check"
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions
+
+  check-node-test:
+    if: needs.files-changed.outputs.check-node-test == 'true'
+    needs: files-changed
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    runs-on:
+      - node
+    timeout-minutes: 60
+    env:
+      GIT_CLEAN_FLAGS: "-ffdx -e node_services/"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        clean: true
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-node-test"
+    - name: Jest Test Report
+      uses: dorny/test-reporter@v1
+      if: always()
+      timeout-minutes: 1
+      with:
+        name: jest-test-report      # Name of the check run which will be created
+        path: app/view/dist/jest-*.xml # Path to the test results
+        reporter: jest-junit        # Format of test results
+        fail-on-empty: 'false'
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions
+#     # 'artifacts.coverage_report' was not transformed because there is no suitable equivalent in GitHub Actions
+
+  check-node-proto:
+    if: needs.files-changed.outputs.check-node-proto == 'true'
+    needs: files-changed
+    runs-on:
+      - node
+    timeout-minutes: 60
+    env:
+      GIT_CLEAN_FLAGS: "-ffdx -e node_services/"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-node-proto-check"
+
+  check-go:
+    if: needs.files-changed.outputs.check-go == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./cicd/bin/pre-merge-go-check"
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions
+#     # 'artifacts.coverage_report' was not transformed because there is no suitable equivalent in GitHub Actions
+
+  check-go-config:
+    if: needs.files-changed.outputs.check-go-config == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./cicd/bin/pre-merge-go-check-config"
+
+  check-py:
+    if: needs.files-changed.outputs.check-py == 'true'
+    needs: files-changed
+    runs-on:
+      - python
+    timeout-minutes: 60
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - name: Fetch relevant commits
+      # check-py looks at files this branch changed relative to the commit where this branch diverges
+      # from the base branch. Make sure that commit exists.
+      run: |
+        while [ -z $( git merge-base ${{ env.GITHUB_BASE_SHA }} ${{ env.GITHUB_HEAD_SHA }} ) ]; do
+          git fetch --deepen=20 origin ${{ env.GITHUB_BASE_SHA }} ${{ env.GITHUB_HEAD_SHA }};
+        done
+    - name: Check Py
+      run: "./cicd/bin/pre-merge-py-check"
+
+  check-gradle-jdk17:
+    if: needs.files-changed.outputs.check-gradle-jdk17 == 'true'
+    needs: files-changed
+    runs-on:
+      - gradle-jdk17
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - name: Setup GitHub CLI
+      run: |
+        sudo apt update
+        sudo apt install -y gh
+        echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+    - name: Fetch current PR labels
+      run: |
+        # Fetch PR data and store in a variable
+        PR_DATA=$(gh pr view ${{ github.event.pull_request.number }} --json labels)
+        echo "PR_DATA: $PR_DATA" # Debugging line to print out raw PR data
+
+        # Extract labels names, assuming PR_DATA is correctly formatted JSON
+        GITHUB_PR_LABELS=$(echo "$PR_DATA" | jq -r '.labels | map(.name) | join(", ")')
+        echo "GITHUB_PR_LABELS=$GITHUB_PR_LABELS"
+        echo "GITHUB_PR_LABELS=$GITHUB_PR_LABELS" >> $GITHUB_ENV
+
+        GRADLE_SELECTIVE_INCLUSION="true"
+        echo "GRADLE_SELECTIVE_INCLUSION=$GRADLE_SELECTIVE_INCLUSION"
+        echo "GRADLE_SELECTIVE_INCLUSION=$GRADLE_SELECTIVE_INCLUSION" >> $GITHUB_ENV
+    - run: "./cicd/bin/pre-merge-gradle-check"
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions
+
+  check-format:
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        clean: true
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-format-check"
+
+  check-sqitch:
+    if: needs.files-changed.outputs.check-sqitch == 'true'
+    needs: files-changed
+    runs-on:
+      - cicd
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./cicd/bin/pre-merge-sqitch-check"
+
+  check-protobuf:
+    if: needs.files-changed.outputs.check-protobuf == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 0
+    - run: "./cicd/bin/pre-merge-protobuf-check"
+
+  check-epoxy:
+    if: needs.files-changed.outputs.check-epoxy == 'true'
+    needs: files-changed
+    runs-on:
+      - go
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./cicd/bin/pre-merge-epoxy-check"
+
+  check-terraform:
+    if: needs.files-changed.outputs.check-terraform == 'true' && !contains(github.event.pull_request.labels.*.name, 'SkipTerraform')
+    needs: files-changed
+    runs-on:
+      - cicd
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "./cicd/bin/pre-merge-terraform-check"
+
+  check-backstage-catalog:
+    if: needs.files-changed.outputs.check-backstage-catalog == 'true'
+    needs: files-changed
+    runs-on:
+      - cicd
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+    - run: "echo 'starting the cue madness!'"
+    - name: Install CUE
+      uses: cue-lang/setup-cue@v1.0.0
+    - name: Validate YAML files
+      run: |
+        # catalog files spread out in different directories
+        find . -name "ownership.yaml" -type f -print0 | while IFS= read -r -d '' file; do
+          echo "Validating $file"
+          cue vet -c "$file" developer/backstage/backstageschema/backstageschema.cue -d "#Catalog"
+        done
+
+        # catalog files inside the backstage directory
+        find ./developer/backstage/catalog -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | while IFS= read -r -d '' file; do
+          echo "Validating $file"
+          cue vet -c "$file" developer/backstage/backstageschema/backstageschema.cue -d "#Catalog"
+        done
+
+        if [ $? -ne 0 ]; then
+          exit 1
+        fi
+
+  validate-check-jobs:
+    needs:
+    - check-codeowners
+    - check-cube
+    - check-databricks-terraform
+    - check-dbt
+    - check-druid
+    - check-model-catalog-yaml
+    - check-commit-message
+    - check-fdk
+    - check-frontend
+    - check-zds
+    - check-zds-a11y
+    - check-visual-tests
+    - check-no-merges
+    - check-node
+    - check-node-lint
+    - check-node-test
+    - check-node-proto
+    - check-go
+    - check-go-config
+    - check-py
+    - check-gradle-jdk17
+    - check-format
+    - check-sqitch
+    - check-protobuf
+    - check-epoxy
+    - check-terraform
+    - check-backstage-catalog
+    runs-on:
+      - cicd
+    # This is necessary since a failed/skipped dependent job would cause this job to be skipped
+    if: "!cancelled()"
+    timeout-minutes: 2
+    steps:
+      # If any jobs we depend on fail, we will fail since this is a required check
+      # NOTE: A timeout is considered a failure
+      - name: Check for failures
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "One of the dependent check-* jobs have failed. You will either need to address the failure, or re-run it to retry." && exit 1
+      - name: asdf
+        run: "echo 'everything is fine'"
+
+  build-test-validate:
+    if: "!cancelled() && contains(needs.validate-check-jobs.result, 'success') && !contains(github.event.pull_request.labels.*.name, 'NoBuildTestValidate')"
+    needs:
+      - validate-check-jobs
+    runs-on:
+      - cicd
+    timeout-minutes: 120
+    env:
+      PR_NUMBER: ${{ github.event.number }}
+    steps:
+    # TODO Add repo-seed
+      - uses: actions/checkout@v4.1.0
+        with:
+          fetch-depth: 0
+      - run: rm -f $(git -C $GITHUB_WORKSPACE rev-parse --git-path objects/info/commit-graph.lock) && git -C $GITHUB_WORKSPACE commit-graph write
+
+      - name: Setup GitHub CLI
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Fetch current PR labels
+        run: |
+         # Fetch PR data and store in a variable
+         PR_DATA=$(gh pr view ${{ github.event.pull_request.number }} --json labels)
+         echo "PR_DATA: $PR_DATA" # Debugging line to print out raw PR data
+
+         # Extract labels names, assuming PR_DATA is correctly formatted JSON
+         GITHUB_PR_LABELS=$(echo "$PR_DATA" | jq -r '.labels | map(.name) | join(", ")')
+         echo "GITHUB_PR_LABELS=$GITHUB_PR_LABELS"
+         echo "GITHUB_PR_LABELS=$GITHUB_PR_LABELS" >> $GITHUB_ENV
+      - run: ZR_GO_SCRIPT_DIR=$(pwd)/bin cicd build-test-validate --report-output build-test-validate-report.xml
+#     # 'artifacts.junit' was not transformed because there is no suitable equivalent in GitHub Actions # TODO figure out how to do the report thing in Github
