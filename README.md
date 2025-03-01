@@ -6,7 +6,7 @@ This uv lock file will preserve the locked versions in the poetry.lock file
 
 ## Running
 ```bash
-convert_poetry_to_uv.sh <path_to_poetry_project>
+poetry2uv <path_to_poetry_project>
 ```
 
 

@@ -1,0 +1,19 @@
+[project]
+name = "poetry2uv"
+version = "0.1.0"
+description = "Converts poetry project to uv, including converting the pyproject.toml file"
+authors = [{name = "Matt Buchovecky", email = "mattb@ziprecruiter.com"}]
+requires-python = ">=3.9,<3.13"
+
+dependencies = [
+    "poetry>=1.7.0,<2",
+    "uv>=0.5.1",
+    "tomlkit>=0.13.2",
+]
+
+[project.scripts]
+poetry2uv = "poetry2uv.cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
