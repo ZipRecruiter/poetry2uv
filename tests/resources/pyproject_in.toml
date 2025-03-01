@@ -1,0 +1,43 @@
+# customize tool.poetry for your app
+[tool.poetry]
+name = "test-name"
+version = "0.2.1"
+description = "Test project for unit testing"
+authors = ["Arthur Author <testauthor@test.org>"]
+
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0"]
+
+[tool.poetry.group.spark.dependencies]
+pyspark = "3.5.0"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+
+# local projects
+project = {path = "../..", develop = true}
+test = {path = "test/", develop = true}
+
+flytekit = "1.10.*"
+flytekitplugins = "1.x"
+sklearn = "~0.24.2"
+scipy = "^0.19.1"
+spacy = ">3.8.2,<3.9"
+numpy = "<=1.23.4"
+click = "^8.1.7"
+pandas = "^0.25.1"
+pyarrow = "^0.0.1"
+aws = "*"
+pytest-cov = {extras = ["toml"], version = ">=3.0.0"}
+
+# git repos
+git1 = {git = "https://github.com/githubuser/repo_name.git", rev = "v2.4.3", markers = "python_version >= \"3.10\""}
+git2 = [
+    { git = "https://github.com/githubuser2/repo2.git", rev = "v3.3.0", python = "~3.8" },
+    { git = "https://github.com/githubuser2/repo2.git", rev = "v3.4.1", python = ">=3.10" }
+]
+
+[tool.pyright]
+extends = "../../../../pyrightconfig.json"
+typeCheckingMode = "off"

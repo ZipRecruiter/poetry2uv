@@ -1,11 +1,15 @@
 import os
 import re
 from copy import deepcopy
+from typing import Any, Collection, Optional
 
 import tomlkit
 from tomlkit import TOMLDocument
 from tomlkit.api import Array
+from tomlkit.exceptions import NonExistentKey
 from tomlkit.toml_file import TOMLFile
+
+PathLike = os.PathLike | str
 
 
 class PyProject:
@@ -14,64 +18,121 @@ class PyProject:
     it does not return the intermediate representation.
     """
 
-    version_pattern = re.compile(r"^([^\d]?)([\d.]+)")
+    version_pattern = re.compile(
+        r"^([=^~]{0,2})([\d.*]+(?:-\w+(?:\.\d)?)?)"
+    )  # versions involving =, ^, ~ need to be converted
     author_pattern = re.compile(r"^(.*?)\s+<([^>]+)>$")
     git_source_keys = {"git", "rev", "tag", "branch"}
 
     def __init__(
         self,
-        input_file: str,
-        output_file: str,
-        project_dir: str = ".",
+        input_file: PathLike,
+        output_file: PathLike,
+        project_dir: PathLike = ".",
         exported_reqs: str = "",
         keep_poetry: bool = False,
+        prompt_for_version: bool = False,
+        remove_entries: Optional[Collection[str]] = None,
     ):
         """Load a pyproject.toml input_file and convert it to PEP 508 format, writing to output_file.
         :param exported_reqs: if provided, will use the requirements.txt file to get exact versions for dependencies.
         """
         self.project_dir = project_dir
+        self.prompt_for_version = prompt_for_version
+        self.sources = {}
+        self.remove_entries = remove_entries if remove_entries is not None else []
         self.convert_to_pep508(input_file, output_file, exported_reqs, keep_poetry)
 
-    def convert_version_constraint(self, version_constraint: str | Array) -> str:
+    def convert_version_entry(self, version_entry: str | Array) -> str:
         """Converts poetry version constraint specifications to PEP 621."""
         # might want to handle multiple comma-separated constraints e.g. str(version_constraint).split(',')
 
-        if isinstance(version_constraint, Array):
-            if len(version_constraint) > 1:
-                print("Multiple constraints for source not supported, please select one:")
-                version_constraint = self.select_input_choice(version_constraint)
-            else:
-                version_constraint = version_constraint[0]
-            if "git" not in version_constraint:
-                raise NotImplementedError("Only git sources are supported currently")
-            self.handle_git_entry(version_constraint)
+        if version_entry == "*":
             return ""
 
-        # check if version constraint is a string matching the typical pattern
-        if (match := self.version_pattern.match(version_constraint)) is not None:
+        if isinstance(version_entry, Array):
+            if len(version_entry) > 1 and self.prompt_for_version:
+                print("Multiple constraints for source not supported, please select one:")
+                version_entry = self.select_input_choice(version_entry)
+            else:
+                version_entry = version_entry[0]
+            if "git" not in version_entry:
+                raise NotImplementedError("Only git sources are supported currently")
+            self.handle_git_entry(version_entry)
+            return ""
+
+        groups = version_entry.split(",")
+
+        return ",".join(self.convert_version_constraint(group) for group in groups)
+
+    @staticmethod
+    def increment_version(version_split: list[str], increment_index: int) -> None:
+        """Increments the version number at the specified index in place."""
+        if increment_index == 2 and "-" in version_split[increment_index]:
+            # if the patch version has a pre-release, increment the pre-release number
+            pre_release_split = version_split[increment_index].split("-")
+            pre_release_split[-1] = str(int(pre_release_split[-1]) + 1)
+            version_split[increment_index] = "-".join(pre_release_split)
+        else:
+            version_split[increment_index] = str(int(version_split[increment_index]) + 1)
+        for i in range(increment_index + 1, len(version_split)):
+            version_split[i] = "0"
+
+    @staticmethod
+    def convert_version_constraint(version_constraint: str) -> str:
+        # check if version constraint is a string matching the typical pattern needing conversion
+        if (match := PyProject.version_pattern.match(version_constraint)) is not None:
             symbols = match.group(1)
             numbers = match.group(2)
+            split_numbers = numbers.split(".")
             upper_constraint = ""
-            if symbols in ["", "="]:
+            i_nonzero = next((i for i, value in enumerate(split_numbers) if int(value) != 0), -1)  # first nonzero index
+
+            if symbols in ["", "="]:  # base case for no symbolic expression, assume equality (includes e.g. 1.2.*)
                 symbols = "=="
-            elif symbols == "*":
-                return ""
             elif symbols == "^":
                 symbols = ">="
-                major = int(numbers.split(".")[0])
-                upper_constraint = f",<{major + 1}"
+                PyProject.increment_version(split_numbers, i_nonzero)
+                # split_numbers[i_nonzero] = str(int(split_numbers[i_nonzero]) + 1)
+                upper_constraint = f",<{'.'.join(map(str, split_numbers[: i_nonzero + 1]))}"
             elif symbols == "~":
                 symbols = ">="
-                major, minor = numbers.split(".")[:2]
-                upper_constraint = f",<{major}.{int(minor) + 1}"
+                if len(split_numbers) >= 3 and i_nonzero < 2:
+                    PyProject.increment_version(split_numbers, 1)
+                    # split_numbers[1] = str(int(split_numbers[1]) + 1)
+                    split_numbers[2] = "0"
+                else:
+                    PyProject.increment_version(split_numbers, len(split_numbers) - 1)
+                    # split_numbers[-1] = str(int(split_numbers[-1]) + 1)
+                upper_constraint = f",<{'.'.join(split_numbers)}"
             return f"{symbols}{numbers}{upper_constraint}"
 
-        if version_constraint == "*":
-            return ""
+        elif version_constraint.startswith("~") or version_constraint.startswith("^"):
+            raise ValueError(f"Invalid version constraint: {version_constraint}")
 
         return str(version_constraint)
 
-    def handle_git_entry(self, git_entry: dict) -> str:
+    @staticmethod
+    def _split_version(version: str) -> tuple[int, int, int, str]:
+        """
+        Parse a version string like "1.2.3" or "1.2.3-alpha" into major, minor, patch, and extra.
+        Returns (major, minor, patch, extra).
+        """
+        # This regex separates out an optional pre-release or build metadata after a dash or plus.
+        match = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?([\-\+].+)?$", version.strip())
+        if not match:
+            # If we can't parse it at all, fallback to all zeros
+            return 0, 0, 0, ""
+
+        major_str, minor_str, patch_str, extra = match.groups()
+        major = int(major_str) if major_str else 0
+        minor = int(minor_str) if minor_str else 0
+        patch = int(patch_str) if patch_str else 0
+        extra = extra or ""
+
+        return major, minor, patch, extra
+
+    def handle_git_entry(self, git_entry: dict[str, Any]) -> str:
         """Converts a git dependency entry to a PEP 508 format.
         Returns the package name."""
         package_name = os.path.splitext(os.path.basename(git_entry["git"]))[0]
@@ -131,6 +192,12 @@ class PyProject:
                     pkg_name = self.handle_git_entry(dep_map)
                     deps.append(pkg_name)
                     continue
+                if "url" in dep_map:
+                    dep_url = dep_map.pop("url")
+                    source = tomlkit.inline_table()
+                    source.update({"url": dep_url})
+                    self.sources[name] = source
+                    deps.append(name)
 
                 # get a local package from a repo path
                 if "path" in dep_map:
@@ -151,7 +218,7 @@ class PyProject:
                 if "extras" in dep_map:
                     vers = str(dep_map.pop("extras")).replace("'", "")
                 if "version" in dep_map:
-                    converted_version = self.convert_version_constraint(dep_map.pop("version"))
+                    converted_version = self.convert_version_entry(dep_map.pop("version"))
                     vers = f"{vers}{converted_version}"
                 optional = dep_map.pop("optional", False)
                 if vers and not optional:
@@ -162,7 +229,7 @@ class PyProject:
                     )
 
             elif dep_v:  # convert a basic version string
-                dep_v = self.convert_version_constraint(dep_v)
+                dep_v = self.convert_version_entry(dep_v)
                 deps.append(f"{name}{dep_v}")
 
         return deps, members
@@ -189,7 +256,7 @@ class PyProject:
         return author_table
 
     def convert_to_pep508(
-        self, input_file: str, output_file: str, exported_reqs: str = "", keep_poetry: bool = False
+        self, input_file: PathLike, output_file: PathLike, exported_reqs: str = "", keep_poetry: bool = False
     ) -> None:
         """Converts a Poetry-style pyproject.toml to PEP 508 format.
         :param input_file: The input pyproject.toml file to read from.
@@ -203,7 +270,11 @@ class PyProject:
 
         # Extract relevant data from the Poetry section
         tool_data = pyproject_data.get("tool", {})
-        poetry_data = tool_data.pop("poetry") if not keep_poetry else tool_data.get("poetry", {})
+        try:
+            poetry_data = tool_data.pop("poetry") if not keep_poetry else tool_data.get("poetry", {})
+        except NonExistentKey:
+            print("tool keys:", tool_data.keys(), sep="\n")
+            raise
         project_name = poetry_data.get("name")
         version = poetry_data.get("version")
         description = poetry_data.get("description")
@@ -213,7 +284,7 @@ class PyProject:
         self.sources = {}
 
         # get main and dev deps
-        python_version = dependencies["python"]
+        python_version = self.convert_version_entry(dependencies["python"])
         deps, members = self.convert_deps_list(dependencies)
         dev_deps, dev_members = self.convert_deps_list(dev_dependencies)
         members.extend(dev_members)
@@ -262,7 +333,19 @@ class PyProject:
         if not keep_poetry:
             pyproject_data.pop("build-system", None)
 
+        # add the PEP 508 data to the pyproject.toml file
         pyproject_data.update(pep508_data)
+
+        # Remove entries specified by the user
+        for entry in self.remove_entries:
+            dict_level = pyproject_data
+            keys = entry.split(".")
+            for key in keys[:-1]:
+                dict_level = dict_level[key]
+            if keys[-1] in dict_level:
+                dict_level.pop(keys[-1])
+
+        # create a new container to write the data to
         container = tomlkit.api.Container()
         container.update(pyproject_data)
         pyproject_data = container
@@ -286,8 +369,12 @@ if __name__ == "__main__":
     parser.add_argument("input_file", default="pyproject.toml", nargs="?", help="Input file")
     parser.add_argument("output_file", default="pyproject_pep508.toml", nargs="?", help="Output file")
     parser.add_argument("--project-dir", default=".", help="Project directory containing pyproject.toml")
-    parser.add_argument("--requirements", help="input requirements file")
+    parser.add_argument("--requirements", dest="exported_reqs", help="input requirements file")
     parser.add_argument("--keep-poetry", action="store_true", help="Keep Poetry sections in the output file")
+    parser.add_argument("--prompt-for-version", action="store_true", help="Prompt for version selection")
+    parser.add_argument("--remove-entries", nargs="+", help="Remove entries from the pyproject.toml file")
     args = parser.parse_args()
 
-    PyProject(args.input_file, args.output_file, args.project_dir, args.requirements, args.keep_poetry)
+    PyProject(
+        **vars(args),
+    )

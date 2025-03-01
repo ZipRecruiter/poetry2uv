@@ -1,0 +1,40 @@
+[tool.uv.sources]
+poetry2uv = {path = "../.."}
+test = {path = "test/"}
+repo_name = {git = "https://github.com/githubuser/repo_name.git", rev = "v2.4.3"}
+repo2 = {git = "https://github.com/githubuser2/repo2.git", rev = "v3.3.0"}
+
+[tool.pyright]
+extends = "../../../../pyrightconfig.json"
+typeCheckingMode = "off"
+
+
+[project]
+name = "test-name"
+version = "0.2.1"
+requires-python = ">=3.10,<3.13"
+description = "Test project for unit testing"
+authors = [{name = "Arthur Author", email = "testauthor@test.org"}]
+dependencies = [
+    "poetry2uv",
+    "test",
+    "flytekit==1.10.*",
+    "flytekitplugins==1.",
+    "sklearn>=0.24.2,<0.25.0",
+    "scipy>=0.19.1,<0.20",
+    "spacy>3.8.2,<3.9",
+    "numpy<=1.23.4",
+    "click>=8.1.7,<9",
+    "pandas>=0.25.1,<0.26",
+    "pyarrow>=0.0.1,<0.0.2",
+    "aws",
+    "pytest-cov[toml]>=3.0.0",
+    "repo_name",
+    "git2",
+]
+
+[dependency-groups]
+spark = [
+    "pyspark==3.5.0",
+]
+dev = []
